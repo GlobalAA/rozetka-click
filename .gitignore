@@ -1,0 +1,119 @@
+# ──────────────────────────────────────────────
+#  Python
+# ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# uv
+.python-version
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+*.coveragerc
+
+# MyPy / type checkers
+.mypy_cache/
+.dmypy.json
+.pyright/
+
+# ──────────────────────────────────────────────
+#  Environment & secrets
+# ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ──────────────────────────────────────────────
+#  Alembic
+# ──────────────────────────────────────────────
+# Keep alembic.ini and versions/ tracked;
+# ignore generated temp files if any
+alembic/versions/__pycache__/
+
+# ──────────────────────────────────────────────
+#  Docker
+# ──────────────────────────────────────────────
+# docker-compose overrides with local secrets
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ──────────────────────────────────────────────
+#  Database
+# ──────────────────────────────────────────────
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.sql.bak
+
+# ──────────────────────────────────────────────
+#  Logs & runtime artifacts
+# ──────────────────────────────────────────────
+*.log
+logs/
+*.pid
+
+# Playwright / browser profiles
+playwright-profiles/
+browser_data/
+user_data*/
+chromium_profile*/
+
+# ──────────────────────────────────────────────
+#  Editors & IDEs
+# ──────────────────────────────────────────────
+# VS Code
+.vscode/
+!.vscode/extensions.json
+
+# JetBrains (PyCharm, etc.)
+.idea/
+*.iml
+
+# Vim / Neovim
+*.swp
+*.swo
+Session.vim
+.vim/
+
+# Emacs
+*~
+\#*\#
+
+# ──────────────────────────────────────────────
+#  OS artifacts
+# ──────────────────────────────────────────────
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+*.desktop~
