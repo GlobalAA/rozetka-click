@@ -1,19 +1,19 @@
 import asyncio
+import os
+import shutil
 from collections.abc import Sequence
+from contextlib import asynccontextmanager
 from random import uniform
 
-
 from loguru import logger
-from playwright.async_api import (Browser, BrowserContext, Error as PlaywrightError,
+from playwright.async_api import (BrowserContext, Error as PlaywrightError,
                                   Page, Playwright, ProxySettings, async_playwright)
 
 from src.config import config
 from src.database.models import Category, Shop
 from src.database.repository import create_product, delete_products, get_shops
-from src.parser.context import with_page
 from src.parser.exceptions import (AdvertisementBlockNotFoundError,
                                    BoundingBoxError,
-                                   BrowserNotInitializedError,
                                    ProductCardsNotFoundError,
                                    ProductsListEmptyError,
                                    TargetProductNotFoundError)
@@ -52,118 +52,131 @@ async def _goto_with_retry(page: Page, url: str, **kwargs) -> object:
     raise last_exc  # type: ignore[misc]
 
 
-class RozetkaBrowser:
-    __slots__: tuple[str, ...] = ("proxy", "browser", "playwright", "context", "worker")
+def _is_test_proxy(proxy: ProxySettings | None) -> bool:
+    """Returns True for test proxies (test://test:90...) that bypass the forwarder."""
+    if proxy is None:
+        return False
+    server: str = proxy.get("server", "")  # type: ignore[union-attr]
+    return server.startswith("test://")
 
-    def __init__(self, proxy: ProxySettings | None = None):
-        self.proxy = proxy
-        self.browser: Browser | None = None
-        self.playwright: Playwright | None = None
-        self.context: BrowserContext | None = None
-        self.worker: RozetkaWorker | None = None
 
-    async def start(self):
-        import os
-        import shutil
+@asynccontextmanager
+async def _browser_session(proxy: ProxySettings | None):
+    """
+    Open a fresh persistent browser context with the given proxy, yield it,
+    then close the context and stop Playwright.
 
-        if os.path.exists(config.PROFILE_PATH):
-            try:
-                shutil.rmtree(config.PROFILE_PATH)
-                logger.info("Cleared browser profile data (Cookies, LocalStorage, etc.)")
-            except Exception as e:
-                logger.warning(f"Failed to clear browser profile data: {e}")
+    Test proxies (test://) are passed directly to the browser without a forwarder.
+    """
+    if os.path.exists(config.PROFILE_PATH):
+        try:
+            shutil.rmtree(config.PROFILE_PATH)
+            logger.info("Cleared browser profile data (Cookies, LocalStorage, etc.)")
+        except Exception as e:
+            logger.warning(f"Failed to clear browser profile data: {e}")
 
-        self.playwright = await async_playwright().start()
-        
-        launch_args = {
+    playwright: Playwright = await async_playwright().start()
+    try:
+        launch_args: dict = {
             "user_data_dir": config.PROFILE_PATH,
             "headless": False,
             "args": ["--disable-blink-features=AutomationControlled"],
         }
-        if self.proxy:
-            launch_args["proxy"] = self.proxy
+        if proxy is not None and not _is_test_proxy(proxy):
+            launch_args["proxy"] = proxy
 
-        self.context = await self.playwright.chromium.launch_persistent_context(**launch_args)
-        self.browser = self.context.browser
-        self.worker = RozetkaWorker(self)
+        context: BrowserContext = await playwright.chromium.launch_persistent_context(**launch_args)
+        context.set_default_timeout(60_000)
+        context.set_default_navigation_timeout(90_000)
+        try:
+            yield context
+        finally:
+            await context.close()
+    finally:
+        await playwright.stop()
 
-        # if not self.proxy:
-        #     logger.error("Proxy not found")
-        #     sys.exit(1)
 
-    async def stop(self):
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
-    @with_page
-    async def get_seller_products(
-        self, page: Page, shops: Sequence[Shop], *, proxy: ProxySettings | None = None
-    ) -> Sequence[Shop]:
-        if not self.worker:
-            raise BrowserNotInitializedError("RozetkaWorker is not initialized")
+async def get_seller_products(
+    shops: Sequence[Shop],
+    proxy: ProxySettings | None = None,
+) -> Sequence[Shop]:
+    """
+    Open browser → scan each shop's product list → close browser.
+    Returns the updated list of shops from the DB.
+    """
+    logger.info("Opening browser for get_seller_products")
+    async with _browser_session(proxy) as context:
+        page = await context.new_page()
+        worker = RozetkaWorker()
 
-        for shop in shops:
-            shop_url = shop.url
-            await delete_products(shop_url)
+        try:
+            for shop in shops:
+                shop_url = shop.url
+                await delete_products(shop_url)
 
-            stop = False
-            page_num = 1
+                stop = False
+                page_num = 1
 
-            while not stop:
-                url = f"{shop_url}?page={page_num}" if page_num > 1 else shop_url
-                response = await _goto_with_retry(page, url)
-                if response:
-                    if response.url != url:
+                while not stop:
+                    url = f"{shop_url}?page={page_num}" if page_num > 1 else shop_url
+                    response = await _goto_with_retry(page, url)
+                    if response and response.url != url:
                         break
 
-                await page.wait_for_load_state("domcontentloaded")
-                await page.wait_for_selector("a.tile-title")
+                    await page.wait_for_load_state("domcontentloaded")
+                    await page.wait_for_selector("a.tile-title")
 
-                urls = await self.worker.get_products(page)
-                if not urls:
-                    stop = True
-                    break
+                    urls = await worker.get_products(page)
+                    if not urls:
+                        stop = True
+                        break
 
-                for product in urls:
-                    await create_product(product.split("/")[-2], shop.id)
+                    for product in urls:
+                        await create_product(product.split("/")[-2], shop.id)
 
-                page_num += 1
+                    page_num += 1
+                    await asyncio.sleep(uniform(2, 6))
 
-                await asyncio.sleep(uniform(2, 6))
+                await asyncio.sleep(uniform(3, 7))
+        finally:
+            await page.close()
 
-            await asyncio.sleep(uniform(3, 7))
+    logger.info("Browser closed after get_seller_products")
+    return await get_shops()
 
-        return await get_shops()
 
-    @with_page
-    async def process_category(
-        self, page: Page, category: Category, products: set[str], *, proxy: ProxySettings | None = None
-    ) -> bool:
-        if not self.worker:
-            raise BrowserNotInitializedError("RozetkaWorker is not initialized")
+async def process_category(
+    category: Category,
+    products: set[str],
+    proxy: ProxySettings | None = None,
+) -> bool:
+    """
+    Open browser → click target product → process advertisements → close browser.
+    """
+    logger.info(f"Opening browser for process_category: {category.target_category}")
+    async with _browser_session(proxy) as context:
+        page = await context.new_page()
+        worker = RozetkaWorker()
 
-        await self.worker.click_target_product(page, category)
+        try:
+            await worker.click_target_product(page, category)
+            await worker.process_adv(page, products)
+        finally:
+            await page.close()
 
-        await self.worker.process_adv(page, products)
+    logger.info("Browser closed after process_category")
+    return True
 
-        return True
 
+# ---------------------------------------------------------------------------
+# Worker (page-level logic only — no browser lifecycle)
+# ---------------------------------------------------------------------------
 
 class RozetkaWorker:
-    __slots__: tuple[str, ...] = ("_rozetka_browser",)
-
-    def __init__(self, browser: RozetkaBrowser):
-        self._rozetka_browser: RozetkaBrowser = browser
-
-    @property
-    def browser(self) -> Browser | None:
-        return self._rozetka_browser.browser
-
-    @property
-    def context(self) -> BrowserContext | None:
-        return self._rozetka_browser.context
 
     async def get_products(self, page: Page) -> list[str] | None:
         urls = await page.query_selector_all("a.tile-title")
@@ -195,30 +208,24 @@ class RozetkaWorker:
 
         if category.target_product not in urls:
             raise TargetProductNotFoundError(
-                f"Target product URL '{category.target_product}' not found in category '{category.target_category}'"
+                f"Target product URL '{category.target_product}' not found "
+                f"in category '{category.target_category}'"
             )
 
         index = urls.index(category.target_product)
-
         await _goto_with_retry(page, urls[index])
-
         await page.wait_for_load_state("domcontentloaded")
-
         await asyncio.sleep(1.525)
 
         return True
 
     async def process_adv(self, page: Page, products: set[str]) -> bool:
-        if not self.browser or not self.context:
-            raise BrowserNotInitializedError(
-                "Browser or context is not initialized in the worker."
-            )
-
         await page.wait_for_load_state("networkidle", timeout=60000)
         await page.wait_for_selector(".h2.pe-2")
 
         adv_block = await page.query_selector(
-            ".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4[data-testid='primacy-slider'] > rz-scroller > .wrap",
+            ".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"
+            "[data-testid='primacy-slider'] > rz-scroller > .wrap",
             strict=True,
         )
 
@@ -240,11 +247,8 @@ class RozetkaWorker:
 
         await page.mouse.move(center_x, center_y)
 
-        total_steps = 20
-        delta_per_step = +200
-
-        for _ in range(total_steps):
-            await page.mouse.wheel(delta_per_step, 0)
+        for _ in range(20):
+            await page.mouse.wheel(+200, 0)
             await asyncio.sleep(0.016)
 
         with_ptoken = await page.query_selector_all("a.text-base[href*='primacyToken']")
@@ -263,7 +267,6 @@ class RozetkaWorker:
                 new_page = await page.context.new_page()
                 await new_page.goto(href)
                 await new_page.wait_for_load_state("networkidle", timeout=60000)
-
                 await asyncio.sleep(uniform(1, 4))
                 await new_page.close()
 

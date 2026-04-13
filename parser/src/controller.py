@@ -10,7 +10,7 @@ from src.database.repository import (add_proxy, create_category, create_shop,
                                      get_parser_status, get_proxies, get_shops,
                                      set_parser_status)
 from src.parser.exceptions import RozetkaError, DuplicateObjectError
-from src.parser.scraper import RozetkaBrowser
+from src.parser.scraper import get_seller_products, process_category, _is_test_proxy
 from src.proxy import validate
 
 
@@ -18,7 +18,6 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
     logger.debug("Start...")
 
     await set_parser_status(True)
-    browser = None
     forwarder = None
 
     try:
@@ -32,55 +31,35 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
             return None
 
         first_proxy = proxies[0]
-        
-        server_str = first_proxy.server
-        if "://" in server_str:
-            server_str = server_str.split("://", 1)[-1]
-        host, port = server_str.split(":", 1)
 
-        from src.local_proxy import LocalForwarder
-        forwarder = LocalForwarder(host, int(port), first_proxy.username, first_proxy.password)
-        await forwarder.start()
+        # Build ProxySettings for the first proxy.
+        # Test proxies (test://) are passed directly — no LocalForwarder needed.
+        if _is_test_proxy(ProxySettings(server=first_proxy.server)):
+            proxy_settings: ProxySettings | None = ProxySettings(server=first_proxy.server)
+            logger.info(f"Using test proxy: {first_proxy.server}")
+        else:
+            server_str = first_proxy.server
+            if "://" in server_str:
+                server_str = server_str.split("://", 1)[-1]
+            host, port = server_str.split(":", 1)
 
-        first_proxy_settings = ProxySettings(
-            server=f"http://127.0.0.1:{forwarder.port}"
-        )
+            from src.local_proxy import LocalForwarder
+            forwarder = LocalForwarder(host, int(port), first_proxy.username, first_proxy.password)
+            await forwarder.start()
 
-        browser = RozetkaBrowser(proxy=first_proxy_settings)
-        await browser.start()
+            proxy_settings = ProxySettings(server=f"http://127.0.0.1:{forwarder.port}")
 
-        logger.info("Start scraping (Scanning Product List)")
-
+        # --- Stage 1: scan product lists ---
         shops_get = await get_shops()
-
         if not shops_get:
             logger.error("Not found shops")
             return None
 
-        await browser.get_seller_products(shops_get)
-        logger.success("Products info updated using scanning proxy")
+        logger.info("Stage 1 — Scanning product list")
+        await get_seller_products(shops_get, proxy=proxy_settings)
+        logger.success("Stage 1 done — product list updated")
 
-        # Now switch to second proxy for main clicking
-        await browser.stop()
-        await forwarder.stop()
-
-        second_proxy = proxies[1]
-        server_str2 = second_proxy.server
-        if "://" in server_str2:
-            server_str2 = server_str2.split("://", 1)[-1]
-        host2, port2 = server_str2.split(":", 1)
-
-        forwarder = LocalForwarder(host2, int(port2), second_proxy.username, second_proxy.password)
-        await forwarder.start()
-
-        second_proxy_settings = ProxySettings(
-            server=f"http://127.0.0.1:{forwarder.port}"
-        )
-
-        browser = RozetkaBrowser(proxy=second_proxy_settings)
-        await browser.start()
-        logger.info("Browser restarted with main proxy")
-
+        # --- Stage 2: process categories ---
         categories = await get_categories()
         if not categories:
             logger.warning("No categories found, skipping process_category")
@@ -89,12 +68,11 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
         all_products = await get_all_product_ids()
         logger.info(f"Loaded {len(all_products)} product IDs from DB")
 
-        # Use the first proxy since it rotates IPs
         for i in range(iterations):
-            logger.info(f"Starting iteration {i + 1}/{iterations}")
+            logger.info(f"Stage 2 — Iteration {i + 1}/{iterations}")
             for category in categories:
                 try:
-                    await browser.process_category(category, all_products)
+                    await process_category(category, all_products, proxy=proxy_settings)
                 except RozetkaError as e:
                     logger.error(f"Error processing category {category.target_category}: {e}")
                     continue
@@ -105,8 +83,6 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
     except Exception as e:
         logger.exception(f"Unexpected error in parser: {e}")
     finally:
-        if browser:
-            await browser.stop()
         if forwarder:
             await forwarder.stop()
         await set_parser_status(False)
@@ -161,9 +137,9 @@ async def handle_start(request: web.Request) -> web.Response:
             return web.json_response({"status": "error", "message": "Invalid delay_value for 'exact_time', expected HH:MM"}, status=400)
 
     proxies = await get_proxies()
-    if len(proxies) != 2:
+    if len(proxies) < 1:
         return web.json_response(
-            {"status": "error", "message": "Exactly 2 proxies are required (1 for scanning, 1 for main)."},
+            {"status": "error", "message": "At least 1 proxy is required."},
             status=400,
         )
 

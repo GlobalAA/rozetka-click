@@ -28,8 +28,8 @@ GUI_DIR = ROOT / "gui_app"
 # How to invoke each project (uv is used for
 # dependency management in both sub-projects)
 # ──────────────────────────────────────────────
-BACKEND_CMD = ["python", "-m", "src"]
-GUI_CMD = ["python", "main.py"]
+BACKEND_CMD = ["uv", "run", "python", "-m", "src"]
+GUI_CMD = ["uv", "run", "python", "main.py"]
 
 # How long to wait for the backend to be ready before launching the GUI
 BACKEND_STARTUP_DELAY = 2  # seconds
