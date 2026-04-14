@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 from aiohttp import web
 from loguru import logger
@@ -86,12 +87,16 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
         if forwarder:
             await forwarder.stop()
         await set_parser_status(False)
-        if (
-            app.get("state")
-            and app["state"].get("parser_task") is not None
-            and app["state"]["parser_task"].done()
-        ):
-            app["state"]["parser_task"] = None
+        # Cancel scheduled stop if parser finished on its own
+        if app.get("state"):
+            state = app["state"]
+            stop_task = state.get("stop_delay_task")
+            if stop_task and not stop_task.done():
+                stop_task.cancel()
+            state["stop_delay_task"] = None
+            state["stop_at"] = None
+            if state.get("parser_task") is not None and state["parser_task"].done():
+                state["parser_task"] = None
 
 
 async def handle_start(request: web.Request) -> web.Response:
@@ -161,8 +166,83 @@ async def handle_start(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "message": "Parser started"})
 
 
+async def _stop_parser_now(app: web.Application) -> None:
+    """Cancel the parser task and clear status."""
+    state = app["state"]
+    parser_task = state.get("parser_task")
+    if parser_task and not parser_task.done():
+        parser_task.cancel()
+        state["parser_task"] = None
+        await set_parser_status(False)
+        logger.info("Parser stopped by scheduled stop task")
+    else:
+        is_running = await get_parser_status()
+        if is_running:
+            await set_parser_status(False)
+            logger.info("Forced DB status to stopped by scheduled stop task")
+    state["stop_at"] = None
+    state["stop_delay_task"] = None
+
+
+async def _stop_parser_delayed(app: web.Application, delay_seconds: int) -> None:
+    try:
+        logger.info(f"Scheduled stop in {delay_seconds} seconds...")
+        await asyncio.sleep(delay_seconds)
+        await _stop_parser_now(app)
+    except asyncio.CancelledError:
+        logger.info("Scheduled stop task was cancelled")
+        raise
+
+
 async def handle_stop(request: web.Request) -> web.Response:
     state = request.app["state"]
+
+    # Parse optional delay from request body
+    try:
+        data = await request.json()
+        delay_type = data.get("delay_type", "none")
+        delay_value = data.get("delay_value", "")
+    except Exception:
+        delay_type = "none"
+        delay_value = ""
+
+    delay_seconds = 0
+    if delay_type == "minutes":
+        try:
+            delay_seconds = int(float(delay_value) * 60)
+        except ValueError:
+            return web.json_response({"status": "error", "message": "Invalid delay_value for 'minutes'"}, status=400)
+    elif delay_type == "hours":
+        try:
+            delay_seconds = int(float(delay_value) * 3600)
+        except ValueError:
+            return web.json_response({"status": "error", "message": "Invalid delay_value for 'hours'"}, status=400)
+    elif delay_type == "exact_time":
+        try:
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            target_time = datetime.strptime(delay_value, "%H:%M").time()
+            target_dt = datetime.combine(now.date(), target_time)
+            if target_dt < now:
+                target_dt += timedelta(days=1)
+            delay_seconds = int((target_dt - now).total_seconds())
+        except ValueError:
+            return web.json_response({"status": "error", "message": "Invalid delay_value for 'exact_time', expected HH:MM"}, status=400)
+
+    # Cancel any previously scheduled stop
+    existing_stop = state.get("stop_delay_task")
+    if existing_stop and not existing_stop.done():
+        existing_stop.cancel()
+        state["stop_delay_task"] = None
+
+    if delay_seconds > 0:
+        state["stop_at"] = time.time() + delay_seconds
+        state["stop_delay_task"] = asyncio.create_task(
+            _stop_parser_delayed(request.app, delay_seconds)
+        )
+        return web.json_response({"status": "ok", "message": f"Parser will stop in {delay_seconds} seconds"})
+
+    # Immediate stop
     parser_task = state.get("parser_task")
     if parser_task and not parser_task.done():
         parser_task.cancel()
@@ -182,9 +262,11 @@ async def handle_stop(request: web.Request) -> web.Response:
     )
 
 
-async def handle_status(_: web.Request) -> web.Response:
+async def handle_status(request: web.Request) -> web.Response:
+    state = request.app["state"]
     is_running = await get_parser_status()
-    return web.json_response({"running": is_running})
+    stop_at = state.get("stop_at")
+    return web.json_response({"running": is_running, "stop_at": stop_at})
 
 
 async def handle_add_proxy(request: web.Request) -> web.Response:

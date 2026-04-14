@@ -5,14 +5,14 @@ API_URL = "http://127.0.0.1:8080/api"
 
 class APIClient:
     @staticmethod
-    def get_status() -> Tuple[bool, str]:
+    def get_status() -> Tuple[bool, Any]:
         try:
             response = requests.get(f"{API_URL}/status", timeout=5)
             response.raise_for_status()
             data = response.json()
-            return True, "Running" if data.get("running") else "Stopped"
+            return True, {"running": data.get("running", False), "stop_at": data.get("stop_at")}
         except Exception as e:
-            return False, f"Connection error: {e}"
+            return False, {"error": str(e)}
 
     @staticmethod
     def start_parser(iterations: int = 1, delay_type: str = "none", delay_value: str = "") -> Tuple[bool, str]:
@@ -31,9 +31,13 @@ class APIClient:
             return False, f"Connection error: {e}"
 
     @staticmethod
-    def stop_parser() -> Tuple[bool, str]:
+    def stop_parser(delay_type: str = "none", delay_value: str = "") -> Tuple[bool, str]:
         try:
-            response = requests.post(f"{API_URL}/stop", timeout=5)
+            payload = {
+                "delay_type": delay_type,
+                "delay_value": delay_value
+            }
+            response = requests.post(f"{API_URL}/stop", json=payload, timeout=5)
             data = response.json()
             if response.status_code == 200:
                 return True, data.get("message", "Stopped")

@@ -1,5 +1,6 @@
 import customtkinter as ctk
 import threading
+import time
 from api_client import APIClient
 from datetime import datetime
 
@@ -17,6 +18,7 @@ class App(ctk.CTk):
         self.grid_columnconfigure(0, weight=1)
 
         self.categories_data = []
+        self._stop_at: float | None = None
 
         self.tabview = ctk.CTkTabview(self)
         self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
@@ -34,6 +36,8 @@ class App(ctk.CTk):
         # Initial checks
         self.refresh_status_event()
         self.refresh_lists_event()
+        self._start_auto_refresh()
+        self._tick_countdown()
 
     def run_async_task(self, func, callback):
         def wrapper():
@@ -65,10 +69,13 @@ class App(ctk.CTk):
         self.status_label = ctk.CTkLabel(control_frame, text="Status: Unknown", text_color="yellow", font=ctk.CTkFont(size=18, weight="bold"))
         self.status_label.pack(side="left", padx=20)
 
+        self.countdown_label = ctk.CTkLabel(control_frame, text="", text_color="orange", font=ctk.CTkFont(size=13))
+        self.countdown_label.pack(side="left", padx=(0, 10))
+
         self.start_btn = ctk.CTkButton(control_frame, text="Start Parser", command=self.open_start_parser_popup, fg_color="green", hover_color="darkgreen")
         self.start_btn.pack(side="left", padx=10, pady=10)
 
-        self.stop_btn = ctk.CTkButton(control_frame, text="Stop Parser", command=self.stop_parser_event, fg_color="red", hover_color="darkred")
+        self.stop_btn = ctk.CTkButton(control_frame, text="Stop Parser", command=self.open_stop_parser_popup, fg_color="red", hover_color="darkred")
         self.stop_btn.pack(side="left", padx=10, pady=10)
 
         self.refresh_btn = ctk.CTkButton(control_frame, text="Refresh", command=self.refresh_status_event)
@@ -84,15 +91,61 @@ class App(ctk.CTk):
         self.textbox.grid(row=1, column=0, sticky="nsew", padx=10, pady=10)
         self.textbox.configure(state="disabled")
 
-    def update_status_label(self, success: bool, msg: str):
+    def update_status_label(self, success: bool, data):
         if success:
-            if msg == "Running":
-                self.status_label.configure(text=f"Status: {msg}", text_color="green")
+            running = data.get("running", False)
+            stop_at = data.get("stop_at")
+            self._stop_at = stop_at if (stop_at and stop_at > time.time()) else None
+            self._running = running
+            if running:
+                self.status_label.configure(text="Status: Running", text_color="green")
+                self.start_btn.configure(state="disabled")
             else:
-                self.status_label.configure(text=f"Status: {msg}", text_color="grey")
+                self._stop_at = None
+                self.status_label.configure(text="Status: Stopped", text_color="grey")
+                self.start_btn.configure(state="normal")
         else:
+            self._stop_at = None
+            self._running = False
             self.status_label.configure(text="Status: Error/Offline", text_color="red")
-            self.log_message(msg, is_error=True)
+            self.start_btn.configure(state="normal")
+            self.log_message(data.get("error", "Connection error"), is_error=True)
+        # Sync stop button state with server data
+        self._update_stop_btn_state()
+
+    def _update_stop_btn_state(self):
+        if self._stop_at is not None and self._stop_at > time.time():
+            self.stop_btn.configure(state="disabled")
+        else:
+            self.stop_btn.configure(state="normal")
+
+    def _start_auto_refresh(self):
+        self._auto_refresh_id = self.after(5000, self._auto_refresh_tick)
+
+    def _auto_refresh_tick(self):
+        self.refresh_status_event()
+        self._auto_refresh_id = self.after(5000, self._auto_refresh_tick)
+
+    def _tick_countdown(self):
+        if self._stop_at is not None:
+            remaining = self._stop_at - time.time()
+            if remaining > 0:
+                hours = int(remaining // 3600)
+                minutes = int((remaining % 3600) // 60)
+                seconds = int(remaining % 60)
+                if hours > 0:
+                    countdown_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+                else:
+                    countdown_str = f"{minutes}:{seconds:02d}"
+                self.countdown_label.configure(text=f"⏱ Stops in {countdown_str}")
+            else:
+                self._stop_at = None
+                self.countdown_label.configure(text="")
+                self.stop_btn.configure(state="normal")
+        else:
+            self.countdown_label.configure(text="")
+        self.after(1000, self._tick_countdown)
+
 
     def refresh_status_event(self):
         self.run_async_task(APIClient.get_status, self.update_status_label)
@@ -201,6 +254,91 @@ class App(ctk.CTk):
         type_map = {"None": "none", "In Minutes": "minutes", "In Hours": "hours", "Exact Time": "exact_time"}
         d_type = type_map.get(delay_type, "none")
         self.run_async_task(lambda: APIClient.start_parser(iterations, d_type, delay_value), _cb)
+
+    def open_stop_parser_popup(self):
+        popup = ctk.CTkToplevel(self)
+        popup.title("Stop Parser Settings")
+        popup.geometry("300x220")
+        popup.resizable(False, False)
+
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() // 2) - 150
+        y = self.winfo_y() + (self.winfo_height() // 2) - 110
+        popup.geometry(f"300x220+{max(0, x)}+{max(0, y)}")
+
+        popup.grab_set()
+        popup.bind("<Escape>", lambda e: popup.destroy())
+
+        frame = ctk.CTkFrame(popup, fg_color="transparent")
+        frame.pack(pady=15, padx=20, fill="both", expand=True)
+
+        # Delay Dropdown Menu
+        row_delay = ctk.CTkFrame(frame, fg_color="transparent")
+        row_delay.pack(fill="x", pady=5)
+        ctk.CTkLabel(row_delay, text="Delay:", width=80, anchor="w", font=ctk.CTkFont(weight="bold")).pack(side="left")
+
+        delay_var = ctk.StringVar(value="None")
+        delay_menu = ctk.CTkOptionMenu(row_delay, values=["None", "In Minutes", "In Hours", "Exact Time"], variable=delay_var)
+        delay_menu.pack(side="right", fill="x", expand=True)
+
+        # Value input
+        self.stop_row_val = ctk.CTkFrame(frame, fg_color="transparent")
+        self.stop_row_val.pack(fill="x", pady=5)
+        ctk.CTkLabel(self.stop_row_val, text="Value:", width=80, anchor="w").pack(side="left")
+        self.stop_delay_value_entry = ctk.CTkEntry(self.stop_row_val, width=100, placeholder_text="")
+        self.stop_delay_value_entry.pack(side="right", fill="x", expand=True)
+
+        def toggle_stop_entry(*args):
+            choice = delay_var.get()
+            if choice == "None":
+                self.stop_row_val.pack_forget()
+            else:
+                self.stop_row_val.pack(fill="x", pady=5)
+                if choice == "In Hours":
+                    self.stop_delay_value_entry.configure(placeholder_text="e.g. 2.5")
+                elif choice == "In Minutes":
+                    self.stop_delay_value_entry.configure(placeholder_text="e.g. 15")
+                else:
+                    self.stop_delay_value_entry.configure(placeholder_text="HH:MM (e.g. 14:30)")
+
+        delay_var.trace_add("write", toggle_stop_entry)
+
+        btn_frame = ctk.CTkFrame(popup, fg_color="transparent")
+        btn_frame.pack(pady=10)
+
+        toggle_stop_entry()
+
+        def on_confirm():
+            d_type = delay_var.get()
+            d_val = self.stop_delay_value_entry.get().strip()
+
+            if d_type in ("In Minutes", "In Hours", "Exact Time") and not d_val:
+                d_type = "None"
+            else:
+                if d_type in ("In Hours", "In Minutes"):
+                    try:
+                        float(d_val)
+                    except ValueError:
+                        self.log_message(f"Delay {d_type.lower()} must be a number", is_error=True)
+                        return
+                elif d_type == "Exact Time":
+                    if ":" not in d_val:
+                        self.log_message("Exact time must be in HH:MM format", is_error=True)
+                        return
+
+            popup.destroy()
+            self.execute_stop_parser(d_type, d_val)
+
+        ctk.CTkButton(btn_frame, text="Stop", command=on_confirm, fg_color="red", hover_color="darkred").pack()
+
+    def execute_stop_parser(self, delay_type: str = "None", delay_value: str = ""):
+        def _cb(success, msg):
+            self.log_message(msg, is_error=not success)
+            self.refresh_status_event()
+
+        type_map = {"None": "none", "In Minutes": "minutes", "In Hours": "hours", "Exact Time": "exact_time"}
+        d_type = type_map.get(delay_type, "none")
+        self.run_async_task(lambda: APIClient.stop_parser(d_type, delay_value), _cb)
 
     def stop_parser_event(self):
         def _cb(success, msg):
