@@ -60,6 +60,11 @@ def _is_test_proxy(proxy: ProxySettings | None) -> bool:
     return server.startswith("test://")
 
 
+def _is_local_socks5(server: str) -> bool:
+    """Returns True for socks5://127.0.0.1:* proxies that don't need auth forwarding."""
+    return server.startswith("socks5://127.0.0.1")
+
+
 @asynccontextmanager
 async def _browser_session(proxy: ProxySettings | None):
     """
@@ -197,6 +202,7 @@ class RozetkaWorker:
 
     async def click_target_product(self, page: Page, category: Category) -> bool:
         await _goto_with_retry(page, category.target_category)
+        await page.wait_for_timeout(10000)
         await page.wait_for_load_state("domcontentloaded")
 
         urls = await self.get_products(page)
@@ -220,8 +226,10 @@ class RozetkaWorker:
         return True
 
     async def process_adv(self, page: Page, products: set[str]) -> bool:
-        await page.wait_for_load_state("networkidle", timeout=60000)
-        await page.wait_for_selector(".h2.pe-2")
+        await page.wait_for_load_state("networkidle", timeout=90000)
+        await page.wait_for_selector(".h2.pe-2", timeout=90000)
+        await page.wait_for_selector(".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"
+            "[data-testid='primacy-slider'] > rz-scroller > .wrap", timeout=90_000)
 
         adv_block = await page.query_selector(
             ".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"

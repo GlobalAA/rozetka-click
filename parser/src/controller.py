@@ -11,7 +11,7 @@ from src.database.repository import (add_proxy, create_category, create_shop,
                                      get_parser_status, get_proxies, get_shops,
                                      set_parser_status)
 from src.parser.exceptions import RozetkaError, DuplicateObjectError
-from src.parser.scraper import get_seller_products, process_category, _is_test_proxy
+from src.parser.scraper import get_seller_products, process_category, _is_test_proxy, _is_local_socks5
 from src.proxy import validate
 
 
@@ -34,10 +34,13 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
         first_proxy = proxies[0]
 
         # Build ProxySettings for the first proxy.
-        # Test proxies (test://) are passed directly — no LocalForwarder needed.
+        # Test proxies (test://) and socks5://127.0.0.1:* are passed directly — no LocalForwarder needed.
         if _is_test_proxy(ProxySettings(server=first_proxy.server)):
             proxy_settings: ProxySettings | None = ProxySettings(server=first_proxy.server)
             logger.info(f"Using test proxy: {first_proxy.server}")
+        elif _is_local_socks5(first_proxy.server):
+            proxy_settings = ProxySettings(server=first_proxy.server)
+            logger.info(f"Using local socks5 proxy directly (no auth forwarding): {first_proxy.server}")
         else:
             server_str = first_proxy.server
             if "://" in server_str:
