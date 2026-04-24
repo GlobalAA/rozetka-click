@@ -6,20 +6,21 @@ from loguru import logger
 from playwright.async_api import ProxySettings
 
 from src.database.repository import (add_proxy, create_category, create_shop,
-                                     delete_category, delete_proxy, delete_shop,
-                                     get_all_product_ids, get_categories,
-                                     get_parser_status, get_proxies, get_shops,
-                                     set_parser_status)
-from src.parser.exceptions import RozetkaError, DuplicateObjectError
-from src.parser.scraper import get_seller_products, process_category, _is_test_proxy, _is_local_socks5
+                                     delete_category, delete_proxy,
+                                     delete_shop, get_all_product_ids,
+                                     get_categories, get_parser_status,
+                                     get_proxies, get_shops, set_parser_status)
+from src.parser.exceptions import DuplicateObjectError, RozetkaError
+from src.parser.scraper import get_seller_products, process_category
 from src.proxy import validate
 
 
-async def start_parser(app: web.Application, iterations: int, delay_seconds: int = 0) -> None:
+async def start_parser(
+    app: web.Application, iterations: int, delay_seconds: int = 0
+) -> None:
     logger.debug("Start...")
 
     await set_parser_status(True)
-    forwarder = None
 
     try:
         if delay_seconds > 0:
@@ -33,25 +34,13 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
 
         first_proxy = proxies[0]
 
-        # Build ProxySettings for the first proxy.
-        # Test proxies (test://) and socks5://127.0.0.1:* are passed directly — no LocalForwarder needed.
-        if _is_test_proxy(ProxySettings(server=first_proxy.server)):
-            proxy_settings: ProxySettings | None = ProxySettings(server=first_proxy.server)
-            logger.info(f"Using test proxy: {first_proxy.server}")
-        elif _is_local_socks5(first_proxy.server):
-            proxy_settings = ProxySettings(server=first_proxy.server)
-            logger.info(f"Using local socks5 proxy directly (no auth forwarding): {first_proxy.server}")
-        else:
-            server_str = first_proxy.server
-            if "://" in server_str:
-                server_str = server_str.split("://", 1)[-1]
-            host, port = server_str.split(":", 1)
-
-            from src.local_proxy import LocalForwarder
-            forwarder = LocalForwarder(host, int(port), first_proxy.username, first_proxy.password)
-            await forwarder.start()
-
-            proxy_settings = ProxySettings(server=f"http://127.0.0.1:{forwarder.port}")
+        # Build ProxySettings — Playwright natively supports username/password.
+        proxy_settings: ProxySettings | None = ProxySettings(server=first_proxy.server)
+        if first_proxy.username:
+            proxy_settings["username"] = first_proxy.username
+        if first_proxy.password:
+            proxy_settings["password"] = first_proxy.password
+        logger.info(f"Using proxy: {first_proxy.server}")
 
         # --- Stage 1: scan product lists ---
         shops_get = await get_shops()
@@ -78,7 +67,9 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
                 try:
                     await process_category(category, all_products, proxy=proxy_settings)
                 except RozetkaError as e:
-                    logger.error(f"Error processing category {category.target_category}: {e}")
+                    logger.error(
+                        f"Error processing category {category.target_category}: {e}"
+                    )
                     continue
 
     except asyncio.CancelledError:
@@ -87,8 +78,6 @@ async def start_parser(app: web.Application, iterations: int, delay_seconds: int
     except Exception as e:
         logger.exception(f"Unexpected error in parser: {e}")
     finally:
-        if forwarder:
-            await forwarder.stop()
         await set_parser_status(False)
         # Cancel scheduled stop if parser finished on its own
         if app.get("state"):
@@ -126,15 +115,22 @@ async def handle_start(request: web.Request) -> web.Response:
         try:
             delay_seconds = int(float(delay_value) * 60)
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'minutes'"}, status=400)
+            return web.json_response(
+                {"status": "error", "message": "Invalid delay_value for 'minutes'"},
+                status=400,
+            )
     elif delay_type == "hours":
         try:
             delay_seconds = int(float(delay_value) * 3600)
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'hours'"}, status=400)
+            return web.json_response(
+                {"status": "error", "message": "Invalid delay_value for 'hours'"},
+                status=400,
+            )
     elif delay_type == "exact_time":
         try:
             from datetime import datetime, timedelta
+
             now = datetime.now()
             target_time = datetime.strptime(delay_value, "%H:%M").time()
             target_dt = datetime.combine(now.date(), target_time)
@@ -142,7 +138,13 @@ async def handle_start(request: web.Request) -> web.Response:
                 target_dt += timedelta(days=1)
             delay_seconds = int((target_dt - now).total_seconds())
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'exact_time', expected HH:MM"}, status=400)
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": "Invalid delay_value for 'exact_time', expected HH:MM",
+                },
+                status=400,
+            )
 
     proxies = await get_proxies()
     if len(proxies) < 1:
@@ -165,7 +167,9 @@ async def handle_start(request: web.Request) -> web.Response:
             status=400,
         )
 
-    state["parser_task"] = asyncio.create_task(start_parser(request.app, iterations, delay_seconds))
+    state["parser_task"] = asyncio.create_task(
+        start_parser(request.app, iterations, delay_seconds)
+    )
     return web.json_response({"status": "ok", "message": "Parser started"})
 
 
@@ -214,15 +218,22 @@ async def handle_stop(request: web.Request) -> web.Response:
         try:
             delay_seconds = int(float(delay_value) * 60)
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'minutes'"}, status=400)
+            return web.json_response(
+                {"status": "error", "message": "Invalid delay_value for 'minutes'"},
+                status=400,
+            )
     elif delay_type == "hours":
         try:
             delay_seconds = int(float(delay_value) * 3600)
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'hours'"}, status=400)
+            return web.json_response(
+                {"status": "error", "message": "Invalid delay_value for 'hours'"},
+                status=400,
+            )
     elif delay_type == "exact_time":
         try:
             from datetime import datetime, timedelta
+
             now = datetime.now()
             target_time = datetime.strptime(delay_value, "%H:%M").time()
             target_dt = datetime.combine(now.date(), target_time)
@@ -230,7 +241,13 @@ async def handle_stop(request: web.Request) -> web.Response:
                 target_dt += timedelta(days=1)
             delay_seconds = int((target_dt - now).total_seconds())
         except ValueError:
-            return web.json_response({"status": "error", "message": "Invalid delay_value for 'exact_time', expected HH:MM"}, status=400)
+            return web.json_response(
+                {
+                    "status": "error",
+                    "message": "Invalid delay_value for 'exact_time', expected HH:MM",
+                },
+                status=400,
+            )
 
     # Cancel any previously scheduled stop
     existing_stop = state.get("stop_delay_task")
@@ -243,7 +260,9 @@ async def handle_stop(request: web.Request) -> web.Response:
         state["stop_delay_task"] = asyncio.create_task(
             _stop_parser_delayed(request.app, delay_seconds)
         )
-        return web.json_response({"status": "ok", "message": f"Parser will stop in {delay_seconds} seconds"})
+        return web.json_response(
+            {"status": "ok", "message": f"Parser will stop in {delay_seconds} seconds"}
+        )
 
     # Immediate stop
     parser_task = state.get("parser_task")
@@ -290,7 +309,10 @@ async def handle_add_proxy(request: web.Request) -> web.Response:
     proxies = await get_proxies()
     if len(proxies) >= 2:
         return web.json_response(
-            {"status": "error", "message": "A maximum of 2 proxies is allowed. Delete an existing proxy first."},
+            {
+                "status": "error",
+                "message": "A maximum of 2 proxies is allowed. Delete an existing proxy first.",
+            },
             status=400,
         )
 
@@ -382,33 +404,49 @@ async def handle_delete_shop(request: web.Request) -> web.Response:
     try:
         shop_id = int(request.match_info["shop_id"])
     except (KeyError, ValueError):
-        return web.json_response({"status": "error", "message": "Invalid shop_id"}, status=400)
+        return web.json_response(
+            {"status": "error", "message": "Invalid shop_id"}, status=400
+        )
 
     deleted = await delete_shop(shop_id)
     if deleted:
         return web.json_response({"status": "ok", "message": f"Shop {shop_id} deleted"})
-    return web.json_response({"status": "error", "message": "Shop not found"}, status=404)
+    return web.json_response(
+        {"status": "error", "message": "Shop not found"}, status=404
+    )
 
 
 async def handle_delete_proxy(request: web.Request) -> web.Response:
     try:
         proxy_id = int(request.match_info["proxy_id"])
     except (KeyError, ValueError):
-        return web.json_response({"status": "error", "message": "Invalid proxy_id"}, status=400)
+        return web.json_response(
+            {"status": "error", "message": "Invalid proxy_id"}, status=400
+        )
 
     deleted = await delete_proxy(proxy_id)
     if deleted:
-        return web.json_response({"status": "ok", "message": f"Proxy {proxy_id} deleted"})
-    return web.json_response({"status": "error", "message": "Proxy not found"}, status=404)
+        return web.json_response(
+            {"status": "ok", "message": f"Proxy {proxy_id} deleted"}
+        )
+    return web.json_response(
+        {"status": "error", "message": "Proxy not found"}, status=404
+    )
 
 
 async def handle_delete_category(request: web.Request) -> web.Response:
     try:
         category_id = int(request.match_info["category_id"])
     except (KeyError, ValueError):
-        return web.json_response({"status": "error", "message": "Invalid category_id"}, status=400)
+        return web.json_response(
+            {"status": "error", "message": "Invalid category_id"}, status=400
+        )
 
     deleted = await delete_category(category_id)
     if deleted:
-        return web.json_response({"status": "ok", "message": f"Category {category_id} deleted"})
-    return web.json_response({"status": "error", "message": "Category not found"}, status=404)
+        return web.json_response(
+            {"status": "ok", "message": f"Category {category_id} deleted"}
+        )
+    return web.json_response(
+        {"status": "error", "message": "Category not found"}, status=404
+    )

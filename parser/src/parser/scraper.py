@@ -6,18 +6,18 @@ from contextlib import asynccontextmanager
 from random import uniform
 
 from loguru import logger
-from playwright.async_api import (BrowserContext, Error as PlaywrightError,
-                                  Page, Playwright, ProxySettings, async_playwright)
+from playwright.async_api import BrowserContext
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import (Page, Playwright, ProxySettings,
+                                  async_playwright)
 
 from src.config import config
 from src.database.models import Category, Shop
 from src.database.repository import create_product, delete_products, get_shops
 from src.parser.exceptions import (AdvertisementBlockNotFoundError,
-                                   BoundingBoxError,
-                                   ProductCardsNotFoundError,
+                                   BoundingBoxError, ProductCardsNotFoundError,
                                    ProductsListEmptyError,
                                    TargetProductNotFoundError)
-
 
 _RETRYABLE_ERRORS = (
     "ERR_EMPTY_RESPONSE",
@@ -52,26 +52,11 @@ async def _goto_with_retry(page: Page, url: str, **kwargs) -> object:
     raise last_exc  # type: ignore[misc]
 
 
-def _is_test_proxy(proxy: ProxySettings | None) -> bool:
-    """Returns True for test proxies (test://test:90...) that bypass the forwarder."""
-    if proxy is None:
-        return False
-    server: str = proxy.get("server", "")  # type: ignore[union-attr]
-    return server.startswith("test://")
-
-
-def _is_local_socks5(server: str) -> bool:
-    """Returns True for socks5://127.0.0.1:* proxies that don't need auth forwarding."""
-    return server.startswith("socks5://127.0.0.1")
-
-
 @asynccontextmanager
 async def _browser_session(proxy: ProxySettings | None):
     """
     Open a fresh persistent browser context with the given proxy, yield it,
     then close the context and stop Playwright.
-
-    Test proxies (test://) are passed directly to the browser without a forwarder.
     """
     if os.path.exists(config.PROFILE_PATH):
         try:
@@ -87,11 +72,13 @@ async def _browser_session(proxy: ProxySettings | None):
             "headless": False,
             "args": ["--disable-blink-features=AutomationControlled"],
         }
-        if proxy is not None and not _is_test_proxy(proxy):
+        if proxy is not None:
             launch_args["proxy"] = proxy
 
-        context: BrowserContext = await playwright.chromium.launch_persistent_context(**launch_args)
-        context.set_default_timeout(60_000)
+        context: BrowserContext = await playwright.chromium.launch_persistent_context(
+            **launch_args
+        )
+        context.set_default_timeout(90_000)
         context.set_default_navigation_timeout(90_000)
         try:
             yield context
@@ -104,6 +91,7 @@ async def _browser_session(proxy: ProxySettings | None):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 async def get_seller_products(
     shops: Sequence[Shop],
@@ -181,6 +169,7 @@ async def process_category(
 # Worker (page-level logic only — no browser lifecycle)
 # ---------------------------------------------------------------------------
 
+
 class RozetkaWorker:
 
     async def get_products(self, page: Page) -> list[str] | None:
@@ -228,8 +217,11 @@ class RozetkaWorker:
     async def process_adv(self, page: Page, products: set[str]) -> bool:
         await page.wait_for_load_state("networkidle", timeout=90000)
         await page.wait_for_selector(".h2.pe-2", timeout=90000)
-        await page.wait_for_selector(".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"
-            "[data-testid='primacy-slider'] > rz-scroller > .wrap", timeout=90_000)
+        await page.wait_for_selector(
+            ".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"
+            "[data-testid='primacy-slider'] > rz-scroller > .wrap",
+            timeout=90_000,
+        )
 
         adv_block = await page.query_selector(
             ".primacy-slider-theme.d-block.mt-2.bg-white.rounded-2.p-4"
@@ -274,7 +266,7 @@ class RozetkaWorker:
             if product_id in products:
                 new_page = await page.context.new_page()
                 await new_page.goto(href)
-                await new_page.wait_for_load_state("networkidle", timeout=60000)
+                await new_page.wait_for_load_state("domcontentloaded", timeout=90000)
                 await asyncio.sleep(uniform(1, 4))
                 await new_page.close()
 
